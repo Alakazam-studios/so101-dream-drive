@@ -18,6 +18,7 @@ Two details that are not guessable and cost us a day each when we got them wrong
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -26,7 +27,9 @@ from pathlib import Path
 
 import numpy as np
 
-DEFAULT_CKPT = "/weights/export_ft7600"
+# Container default; SO101_CKPT overrides it, which is how a host that mounts the
+# weights elsewhere points at them without editing the image.
+DEFAULT_CKPT = os.environ.get("SO101_CKPT", "/weights/export_ft7600")
 
 
 class Engine:
@@ -78,17 +81,23 @@ class Engine:
         work.mkdir(parents=True, exist_ok=True)
         try:
             cond_path = _encode(np.asarray(cond), work / "cond.mp4", fps)
+            # The sample schema rejects unknown top-level keys, and `action` is one of
+            # them: the actions go to a JSON file referenced by `action_path`. The mode
+            # key is `model_mode`, not `action_mode`. Both were wrong in the first port
+            # and each failed as a pydantic extra_forbidden rather than anything readable.
+            apath = work / "actions.json"
+            apath.write_text(json.dumps(actions))
             spec = {
                 "name": f"req{self._n:05d}",
                 "prompt": prompt,
-                "action_mode": "forward_dynamics",
+                "model_mode": "forward_dynamics",
                 "domain_name": domain,
                 "view_point": view,
-                "action": actions,
+                "action_path": str(apath),
                 "action_chunk_size": len(actions),
                 "raw_action_dim": len(actions[0]),
-                "num_frames": str(len(actions) + 1),
-                "fps": str(fps),
+                "image_size": 480,
+                "fps": int(fps),
                 "num_steps": steps,
                 "guidance": guidance,
                 "seed": 0,
