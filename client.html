@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SO-101 · drive the dream</title>
+<style>
+  :root { --fg:#e8e6df; --dim:#98a29a; --accent:#e07a3f; --panel:#17151280; --rule:#2c2822; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:#07090b; color:var(--fg); font:14px/1.45 ui-monospace,"SF Mono",Menlo,monospace;
+         min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:18px; gap:12px; }
+  h1 { font-size:15px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); }
+  h1 small { color:var(--dim); letter-spacing:0; text-transform:none; margin-left:10px; }
+  #stage { position:relative; }
+  canvas { width:640px; height:480px; background:#000; border:1px solid var(--rule); border-radius:8px; display:block; }
+  #hud { position:absolute; left:8px; top:8px; background:var(--panel); padding:6px 9px; border-radius:6px;
+         font-size:11.5px; color:var(--dim); white-space:pre; pointer-events:none; backdrop-filter:blur(4px); }
+  .row { display:flex; gap:8px; width:640px; align-items:center; flex-wrap:wrap; }
+  input[type=text] { flex:1; background:#141210; color:var(--fg); border:1px solid var(--rule);
+                     border-radius:6px; padding:8px 10px; font:inherit; }
+  button { background:#1d1a15; color:var(--fg); border:1px solid #3a352d; border-radius:6px;
+           padding:8px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#141210; border-color:var(--accent); font-weight:600; }
+  button.on { background:#274232; border-color:#55a065; }
+  .sliders { width:640px; display:grid; grid-template-columns:110px 1fr 52px; gap:6px 10px; align-items:center;
+             background:#100e0c; border:1px solid #221f1a; border-radius:8px; padding:12px; }
+  .sliders label { color:var(--dim); font-size:12px; }
+  .sliders output { text-align:right; font-size:12px; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  .anchors { display:flex; gap:8px; }
+  .anchors img { width:84px; height:63px; object-fit:cover; border:2px solid var(--rule); border-radius:6px; cursor:pointer; }
+  .anchors img.sel { border-color:var(--accent); }
+  #log { width:640px; height:74px; overflow-y:auto; font-size:11px; color:var(--dim);
+         background:#100e0c; border:1px solid #221f1a; border-radius:6px; padding:6px 8px; }
+</style>
+</head>
+<body>
+<h1>SO-101 · drive the dream<small id="tag">every frame generated · nothing rendered</small></h1>
+
+<div id="stage">
+  <canvas id="cv" width="640" height="480"></canvas>
+  <div id="hud">disconnected</div>
+</div>
+
+<div class="row">
+  <span class="anchors" id="anchors"></span>
+  <button id="connect" class="primary">Connect</button>
+  <button id="grip">grip: OPEN</button>
+  <button id="reset">↺ reset to anchor</button>
+  <button id="stop">Stop</button>
+</div>
+
+<div class="sliders" id="sliders"></div>
+<div id="log"></div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const hud = document.getElementById('hud'), logEl = document.getElementById('log');
+  const log = m => { logEl.insertAdjacentHTML('beforeend', `<div>${new Date().toISOString().slice(11,19)} ${m}</div>`); logEl.scrollTop = 1e9; };
+
+  const JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"];
+  const S = document.getElementById('sliders');
+  const sliders = JOINTS.map((name, i) => {
+    const lab = document.createElement('label'); lab.textContent = name;
+    const inp = document.createElement('input');
+    inp.type = 'range'; inp.min = -100; inp.max = 100; inp.step = 0.5; inp.value = 0;
+    const out = document.createElement('output'); out.textContent = '0.0';
+    inp.addEventListener('input', () => out.textContent = (+inp.value).toFixed(1));
+    S.append(lab, inp, out);
+    return inp;
+  });
+  let grip = 0;
+  const gripBtn = document.getElementById('grip');
+  gripBtn.onclick = () => { grip = 1 - grip;
+    gripBtn.textContent = 'grip: ' + (grip ? 'CLOSED' : 'OPEN');
+    gripBtn.classList.toggle('on', !!grip); };
+
+  let ws = null, anchor = null, frames = [], playT = null, lastChunk = null;
+  const anchorsEl = document.getElementById('anchors');
+  const connectBtn = document.getElementById('connect');
+
+  function setPose(pose) {
+    sliders.forEach((s, i) => { s.value = pose[i]; s.dispatchEvent(new Event('input')); });
+    grip = pose[5] < 35 ? 1 : 0;
+    gripBtn.textContent = 'grip: ' + (grip ? 'CLOSED' : 'OPEN');
+    gripBtn.classList.toggle('on', !!grip);
+  }
+
+  function connect() {
+    if (ws && ws.readyState <= 1) { log('already connecting/connected — ignored'); return; }
+    started = false; frames = [];
+    connectBtn.disabled = true; connectBtn.textContent = 'waking GPU…';
+    hud.textContent = 'waking the GPU — cold start takes ~3-4 min, leave this open';
+    log('connecting… (cold start can take ~3-4 min; do NOT click again)');
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/session`);
+    ws.onopen = () => { hud.textContent = 'connected — engine warming, first chunk ~30 s'; log('ws open'); };
+    ws.onclose = () => { hud.textContent = 'disconnected'; log('ws closed');
+      started = false; ws = null;
+      connectBtn.disabled = false; connectBtn.textContent = 'Connect'; };
+    ws.onmessage = ev => {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'ready') {
+        connectBtn.textContent = 'connected';
+        anchorsEl.innerHTML = '';
+        Object.entries(m.anchors).forEach(([id, a], k) => {
+          const im = document.createElement('img');
+          im.src = `/anchors/${id}.png`; im.title = `${id} (held-out ep${a.episode})`;
+          im.onclick = () => { anchor = id;
+            [...anchorsEl.children].forEach(c => c.classList.remove('sel')); im.classList.add('sel');
+            if (started) { ws.send(JSON.stringify({type:'reset', anchor:id})); setPose(m.anchors[id].pose); }
+            else start(m.anchors[id].pose); };
+          if (k === 0 && !anchor) { anchor = id; im.classList.add('sel'); }
+          anchorsEl.appendChild(im);
+        });
+        log(`ready ${m.version} — click an anchor or Connect started ${anchor}`);
+        start(m.anchors[anchor].pose);
+      } else if (m.type === 'chunk') {
+        lastChunk = m;
+        m.jpegs.forEach(j => frames.push(j));
+        hud.textContent = `chunk ${m.n}(${m.chunk_len}f auto)  gen ${m.gen_s}s  rt ×${m.rt}  buf ${frames.length}f` + (m.clamped ? '  [slew-clamped]' : '');
+      } else if (m.type === 'reset_ok') { frames = []; log(`reset → ${m.anchor}`);
+      } else if (m.type === 'error') { log(`ERROR ${m.msg}`); }
+    };
+  }
+
+  let started = false;
+  function start(pose) {
+    if (started || !ws || ws.readyState !== 1) return;
+    started = true;
+    setPose(pose);
+    const q = new URLSearchParams(location.search);
+    ws.send(JSON.stringify({type:'start', anchor,
+      steps: +(q.get('steps') || 15), guidance: +(q.get('guidance') || 1.0),
+      handoff: q.get('handoff') || 'motion', seed: +(q.get('seed') || 0),
+      chunk_len: +(q.get('chunk') || 12)}));
+    log(`start ${anchor} steps=${q.get('steps')||15} chunk=${q.get('chunk')||12}`);
+  }
+
+  // playback: drain at 15 fps; keep the backlog SHORT so what you see is near the
+  // generation head — at >1x realtime the queue otherwise grows and every slider
+  // move feels seconds late (Hugo's catch, 2026-08-06)
+  const img = new Image();
+  setInterval(() => {
+    if (!frames.length) return;
+    if (frames.length > 12) frames = frames.slice(-8);    // stay near live
+    const j = frames.shift();
+    img.onload = () => ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    img.src = 'data:image/jpeg;base64,' + j;
+  }, 1000 / 15);
+
+  // controls: latest-wins at 10 Hz
+  setInterval(() => {
+    if (!ws || ws.readyState !== 1 || !started) return;
+    ws.send(JSON.stringify({type:'ctl', pose: sliders.map(s => +s.value), grip}));
+  }, 100);
+
+  connectBtn.onclick = connect;
+  document.getElementById('reset').onclick = () => ws && ws.send(JSON.stringify({type:'reset', anchor}));
+  document.getElementById('stop').onclick = () => { if (ws) { ws.send(JSON.stringify({type:'stop'})); ws.close(); } started = false; };
+})();
+</script>
+</body>
+</html>
