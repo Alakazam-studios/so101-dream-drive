@@ -1,0 +1,12 @@
+runtime:
+  import: so101_dream:SO101DreamDrive
+
+recording:
+  enabled: true
+  chunk_seconds: 4
+  clip_max_seconds: 300
+  video_track: main_video
+  video:
+    codec: h264
+    preset: veryfast
+    crf: 23

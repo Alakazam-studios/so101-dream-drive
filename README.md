@@ -120,3 +120,36 @@ Model weights inherit **OpenMDW-1.1** from `nvidia/Cosmos3-Edge`, which carries 
 guardrail obligation and no attribution requirement on outputs. Note that other Cosmos SKUs (Transfer, Predict)
 use NVIDIA's Open Model License, which has a self-executing termination clause; terms do
 not transfer between them. Code in this repo is MIT.
+
+## Running it on Reactor
+
+`reactor/` is the same model as a [Reactor Runtime](https://github.com/reactor-team/reactor-runtime)
+pipeline. The runtime supplies the session lifecycle, WebRTC transport, frame pacing and
+typed commands, so `live_driver_so101.py` and `client.html` are not needed there: the
+sliders become `set_shoulder_pan`, `set_grip` and so on, generated from the state class.
+
+```sh
+cd reactor
+reactor dev            # local, same image as deploys
+```
+
+| file | what it does |
+|---|---|
+| `reactor/so101_dream.py` | The pipeline: typed joint state, slew clamp, motion hand-off, chunk prefetch. |
+| `reactor/so101_engine.py` | The cosmos-framework side: load once, generate a chunk, return frames. |
+| `reactor/reactor.yaml` | Entry point and recording config. |
+
+Three things in the port are about the robot rather than the transport, and are the
+reason this is not just a wrapper:
+
+**The slew clamp.** Sliders are absolute joint targets, so a client can jerk one from
+-100 to +100 in a single message. The model saw teleop at human speeds, and a step that
+large is off-corpus. Each chunk walks from the current pose toward the target under a
+per-step limit (6.0 units/step for the arm, 90 units/s, inside the corpus envelope).
+
+**The motion hand-off.** Each chunk is conditioned on the tail of the previous one, so
+motion continues instead of restarting from an anchor every second.
+
+**Chunk prefetch.** A chunk is 16 frames at 15 fps, about 1.07 s of motion, and it takes
+longer than that to generate. A worker produces chunk N+1 while the stream plays chunk N;
+without it the stream stalls between every chunk.

@@ -1,0 +1,5 @@
+# The framework, its exact torch build and the custom NATTEN wheel are NOT pip-resolvable;
+# they come from the image (us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd:1.0).
+# Only what the pipeline itself adds beyond that:
+numpy
+pillow
