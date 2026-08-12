@@ -127,8 +127,8 @@ If you only want to see it work, this is the whole thing. No weights to fetch, n
 no account:
 
 ```bash
-docker run --gpus all -p 8080:8080 -p 8899:8899 -p 10000-60000:10000-60000/udp \
-  us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd-reactor:1.0
+docker run --gpus all --network host \
+  us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd-reactor:1.1
 ```
 
 Open `http://<host>:8899/client.html` and press Connect. The image carries the environment,
@@ -136,8 +136,14 @@ the [Reactor Runtime](https://github.com/reactor-team/reactor-runtime), the pipe
 checkpoint; it serves signalling and media on 8080 and the page on 8899. One GPU with ~24 GB
 free is enough, and the model needs about 22 GB of it.
 
-The UDP range is for WebRTC media. Without it the page connects, reports a healthy session,
-and never shows a frame.
+Use host networking. WebRTC picks its media port at connection time out of a wide range, and
+publishing that range with `-p 10000-60000:10000-60000/udp` makes Docker start a userland
+proxy per port. If you must map ports instead, the media range has to be reachable or the
+page will connect, report a healthy session, and never show a frame.
+
+The image is large: **102 GB on disk**, most of it the base environment (the site-packages
+bake and a HuggingFace cache holding the Cosmos3-Edge base weights) rather than our
+checkpoint. Budget for the pull.
 
 Everything below is the longer path: the two-process WebSocket stack, and building the
 Reactor workspace yourself.

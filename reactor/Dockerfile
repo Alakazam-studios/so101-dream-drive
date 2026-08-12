@@ -13,6 +13,17 @@
 # reproduce it, which is why it ships as bytes.
 FROM us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd:1.0
 
+# A C compiler, which is NOT optional and is not obvious. The experiment compiles the
+# tokenizer (`compile_tokenizer=dict(enabled=True, warmup_resolutions=["480"])`), so
+# torch.compile invokes inductor at RUN time, and inductor shells out to a C compiler. The
+# base image has no toolchain, so without this every chunk dies with
+# "InductorError: Failed to find C compiler" while the container still loads the model,
+# reports `session ready`, accepts a WebRTC connection and streams exactly one keyframe.
+# Nothing about that failure points at a missing compiler.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+ENV CC=gcc CXX=g++
+
 # The runtime, plus the one dependency that decides whether these two stacks can share a
 # process at all: reactor-runtime needs protobuf 7, and wandb below 0.28 pins protobuf 5, so
 # importing both in one interpreter fails on the older wandb. These are the exact versions
@@ -45,8 +56,9 @@ ENV SO101_CKPT=/models/export_ft7600 \
 # Fail the BUILD, not the first request, if the two stacks cannot coexist or the weights did
 # not land. This is the check that catches a protobuf regression on a dependency bump.
 RUN python3.13 -c "\
-import os, cosmos_framework, reactor_runtime, google.protobuf as pb;\
+import os, shutil, cosmos_framework, reactor_runtime, google.protobuf as pb;\
 print('cosmos + reactor import OK, protobuf', pb.__version__);\
+assert shutil.which('gcc'), 'no C compiler: torch.compile fails at run time, not build time';\
 ck = os.environ['SO101_CKPT'];\
 assert os.path.isdir(ck + '/anchors'), 'anchors missing under ' + ck;\
 assert os.path.isfile(ck + '/config.json'), 'export config.json missing under ' + ck;\
