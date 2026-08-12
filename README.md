@@ -125,16 +125,28 @@ not transfer between them. Code in this repo is MIT.
 
 `reactor/` is the same model as a [Reactor Runtime](https://github.com/reactor-team/reactor-runtime)
 pipeline. The runtime supplies the session lifecycle, WebRTC transport, frame pacing and
-typed commands, so `live_driver_so101.py` and `client.html` are not needed there: the
-sliders become `set_shoulder_pan`, `set_grip` and so on, generated from the state class.
+typed commands, so the two files at the repo root that implement those things,
+`live_driver_so101.py` and `client.html`, are not used on this path. The sliders become
+`set_shoulder_pan`, `set_grip` and so on, generated from the state class.
 
 ```sh
 cd reactor
 reactor dev            # local, same image as deploys
 ```
 
+`reactor/client.html` is the browser page for this path. It is a static file with no build
+step, so serve it from anywhere and point it at the runtime:
+
+```sh
+cd reactor && python3 -m http.server 8899     # open http://localhost:8899/client.html
+```
+
+The runtime address is editable on the page, or pass `?base=http://HOST:8080`. Connect starts
+a session, negotiates WebRTC, and opens the data channel the commands travel on.
+
 | file | what it does |
 |---|---|
+| `reactor/client.html` | The page: joint sliders, reset, pause. Speaks the runtime's protocol directly. |
 | `reactor/so101_dream.py` | The pipeline: typed joint state, slew clamp, motion hand-off, chunk prefetch. |
 | `reactor/so101_engine.py` | The cosmos-framework side: load once, generate a chunk, return frames. |
 | `reactor/reactor.yaml` | Entry point and recording config. |
