@@ -90,7 +90,10 @@ const JOINTS = [
 
 const $ = id => document.getElementById(id);
 const qs = new URLSearchParams(location.search);
-$("base").value = qs.get("base") || "http://34.135.249.244:8080";
+// ?base wins. Otherwise assume the runtime is on the host that served this page, which is
+// what happens inside the container image; fall back to localhost for a file:// open.
+const sameHost = location.hostname ? `${location.protocol}//${location.hostname}:8080` : "";
+$("base").value = qs.get("base") || sameHost || "http://127.0.0.1:8080";
 
 let pc = null, dc = null, paused = false;
 

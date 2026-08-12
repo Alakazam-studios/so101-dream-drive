@@ -121,6 +121,27 @@ guardrail obligation and no attribution requirement on outputs. Note that other 
 use NVIDIA's Open Model License, which has a self-executing termination clause; terms do
 not transfer between them. Code in this repo is MIT.
 
+## The short way: one container, nothing to download
+
+If you only want to see it work, this is the whole thing. No weights to fetch, no volumes,
+no account:
+
+```bash
+docker run --gpus all -p 8080:8080 -p 8899:8899 -p 10000-60000:10000-60000/udp \
+  us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd-reactor:1.0
+```
+
+Open `http://<host>:8899/client.html` and press Connect. The image carries the environment,
+the [Reactor Runtime](https://github.com/reactor-team/reactor-runtime), the pipeline and the
+checkpoint; it serves signalling and media on 8080 and the page on 8899. One GPU with ~24 GB
+free is enough, and the model needs about 22 GB of it.
+
+The UDP range is for WebRTC media. Without it the page connects, reports a healthy session,
+and never shows a frame.
+
+Everything below is the longer path: the two-process WebSocket stack, and building the
+Reactor workspace yourself.
+
 ## Running it on Reactor
 
 `reactor/` is the same model as a [Reactor Runtime](https://github.com/reactor-team/reactor-runtime)
@@ -150,6 +171,7 @@ a session, negotiates WebRTC, and opens the data channel the commands travel on.
 | `reactor/so101_dream.py` | The pipeline: typed joint state, slew clamp, motion hand-off, chunk prefetch. |
 | `reactor/so101_engine.py` | The cosmos-framework side: load once, generate a chunk, return frames. |
 | `reactor/reactor.yaml` | Entry point and recording config. |
+| `reactor/Dockerfile` | Builds the one-command image above: runtime, pipeline, page and weights. |
 
 Three things in the port are about the robot rather than the transport, and are the
 reason this is not just a wrapper:
