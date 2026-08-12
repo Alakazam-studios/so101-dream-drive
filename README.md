@@ -36,9 +36,22 @@ You need one GPU with ~24 GB free, Docker, and the weights.
 docker pull us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd:1.0
 ```
 
-It carries torch 2.10.0+cu130 with a custom NATTEN build, the cosmos-framework tree with
-the SO-101 modules registered, FFmpeg, and a prepopulated HuggingFace cache. Building this
-environment from a requirements file does not work; we shipped the bytes for a reason.
+It carries torch 2.10.0+cu130, NATTEN, the cosmos-framework tree with the SO-101 modules
+registered, FFmpeg, and a prepopulated HuggingFace cache.
+
+The environment ships as prebuilt site-packages, but it does reproduce from the framework's
+own `uv.lock` if you would rather build it:
+
+```bash
+uv sync --frozen --group cu130 --extra serve
+uv pip install iopath multi-storage-client boto3 wandb qwen_vl_utils
+```
+
+The `cu130` group pins `torch==2.10.0+cu130` and `natten==0.21.6.dev6+cu130.torch210.gb300`.
+The second line matters: the framework imports those five at inference time and the `serve`
+extra does not declare them, `iopath` being declared only under `train`. A lock-built
+environment reproduces this checkpoint's output on the known-answer pair to 0.108 mean /
+2 max, against a tolerance of 6.0 / 60.
 
 **2. Get the weights.** This demo wants the **export** format (a directory with its own
 `config.json`), not the raw DCP checkpoint:
@@ -128,7 +141,7 @@ no account:
 
 ```bash
 docker run --gpus all --network host \
-  us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd-reactor:1.1
+  us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd-reactor:2.2
 ```
 
 Open `http://<host>:8899/client.html` and press Connect. The image carries the environment,
@@ -136,14 +149,21 @@ the [Reactor Runtime](https://github.com/reactor-team/reactor-runtime), the pipe
 checkpoint; it serves signalling and media on 8080 and the page on 8899. One GPU with ~24 GB
 free is enough, and the model needs about 22 GB of it.
 
+Or build it yourself, which is the same thing: `reactor/Dockerfile` clones the framework at a
+pinned commit, builds the environment from that repo's own `uv.lock`, and bakes the weights.
+Nothing in it is private.
+
+```bash
+docker build -t so101-fd-reactor reactor/
+```
+
 Use host networking. WebRTC picks its media port at connection time out of a wide range, and
 publishing that range with `-p 10000-60000:10000-60000/udp` makes Docker start a userland
 proxy per port. If you must map ports instead, the media range has to be reachable or the
 page will connect, report a healthy session, and never show a frame.
 
-The image is large: **102 GB on disk**, most of it the base environment (the site-packages
-bake and a HuggingFace cache holding the Cosmos3-Edge base weights) rather than our
-checkpoint. Budget for the pull.
+The image is about **60 GB on disk**, most of it the base weights and CUDA libraries rather
+than our checkpoint. Budget for the pull.
 
 Everything below is the longer path: the two-process WebSocket stack, and building the
 Reactor workspace yourself.
@@ -177,7 +197,9 @@ a session, negotiates WebRTC, and opens the data channel the commands travel on.
 | `reactor/so101_dream.py` | The pipeline: typed joint state, slew clamp, motion hand-off, chunk prefetch. |
 | `reactor/so101_engine.py` | The cosmos-framework side: load once, generate a chunk, return frames. |
 | `reactor/reactor.yaml` | Entry point and recording config. |
-| `reactor/Dockerfile` | Builds the one-command image above: runtime, pipeline, page and weights. |
+| `reactor/Dockerfile` | Builds the image above from source: framework at a pinned commit, environment from its `uv.lock`, weights baked. |
+| `reactor/entrypoint.sh` | Puts torch's own CUDA libraries ahead of the system ones before anything imports torch. |
+| `reactor/register_experiment.py` | Adds the experiment import to `configs/base/config.py`, which is what makes the checkpoint resolvable. |
 
 Three things in the port are about the robot rather than the transport, and are the
 reason this is not just a wrapper:

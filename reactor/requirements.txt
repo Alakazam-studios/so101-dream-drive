@@ -1,5 +1,21 @@
-# The framework, its exact torch build and the custom NATTEN wheel are NOT pip-resolvable;
-# they come from the image (us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd:1.0).
-# Only what the pipeline itself adds beyond that:
+# The pipeline itself only adds these two beyond the framework environment:
 numpy
 pillow
+
+# The framework environment comes from the image
+# (us-central1-docker.pkg.dev/ewilan-pipeline/so101/so101-fd-reactor:1.1), where it ships as
+# prebuilt site-packages. That is history rather than necessity: it IS reproducible from the
+# framework's own uv.lock, and we have verified that a lock-built environment produces the
+# same output as the baked one on the known-answer pair (0.108 mean / 2 max against a
+# tolerance of 6.0 / 60, where the baked environment's own run-to-run delta is 0).
+#
+#   uv sync --frozen --group cu130 --extra serve
+#   uv pip install iopath multi-storage-client boto3 wandb qwen_vl_utils
+#
+# The `cu130` group pins torch==2.10.0+cu130 and
+# natten==0.21.6.dev6+cu130.torch210.gb300; both are published wheels.
+#
+# The second line is the part that is not obvious: the framework imports those five at
+# inference time and the `serve` extra does not declare them. `iopath` is declared only under
+# the `train` extra, and it is reached through cosmos_framework.inference.args ->
+# lazy_config.file_io, so serving without it fails on import.
