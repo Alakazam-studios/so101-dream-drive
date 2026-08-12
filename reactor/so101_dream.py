@@ -46,7 +46,14 @@ PROMPT = "pick up the blue object and place it in the yellow bin"
 RAW_DIM = 6
 DEF_STEPS = 30
 DEF_GUIDANCE = 1.0
-HANDOFF_FRAMES = 5              # tail of the previous chunk used as the next conditioning
+# Tail of the previous chunk handed to the next as conditioning. MEASURED, not reasoned:
+# a hold-pose A/B (same anchor, same actions, same seed, 8 chunks) puts positional drift at
+# parity (MSE vs anchor 273 at h=1 against 274 at h=5) but separates sharply on texture —
+# Laplacian variance falls 751 -> 681 at h=1 and holds at ~740 from chunk 2 onward at h=5,
+# i.e. 15.8% of the anchor's high-frequency energy lost versus 8.5%. The single-frame version
+# melts. Reading the framework's `condition_frame_indexes = list(range(n))` suggests only the
+# leading frame should matter, so this contradicts the code; trust the measurement.
+HANDOFF_FRAMES = 5
 
 # LeRobot units per 1/15 s step, measured against the training corpus envelope.
 ARM_SLEW = 6.0
@@ -100,8 +107,15 @@ class SO101DreamDrive(ReactorPipeline):
         self.pose = self.anchor[1].astype(np.float32).copy()
         self._frames: queue.Queue = queue.Queue(maxsize=CHUNK * 3)
         self._stop = threading.Event()
-        self._worker = threading.Thread(target=self._produce, daemon=True)
-        self._worker.start()
+        self._worker: threading.Thread | None = None
+        # Bumped by every reset. A chunk that was already in flight when the reset landed
+        # carries the old epoch and is thrown away instead of overwriting the fresh anchor —
+        # otherwise a reset issued mid-chunk is silently undone a second later by the
+        # generation it interrupted, which makes the button look like it does nothing.
+        self._epoch = 0
+        # The worker is NOT started here: `state` is bound after load() returns, and a
+        # thread that reads it immediately dies on NoneType. It starts on the first
+        # inference() turn, when the state is guaranteed to exist.
         logger.info("so101 dream drive ready", fps=FPS, chunk=CHUNK)
 
     @event(name="reset_to_anchor", description="Return to the starting frame and pose.")
@@ -113,8 +127,9 @@ class SO101DreamDrive(ReactorPipeline):
         with self._lock():
             self.cond = self.anchor[0]
             self.pose = self.anchor[1].astype(np.float32).copy()
+            self._epoch += 1
             self._drain()
-        logger.info("reset to anchor")
+        logger.info("reset to anchor", epoch=self._epoch)
 
     def _lock(self):
         if not hasattr(self, "_mutex"):
@@ -128,9 +143,8 @@ class SO101DreamDrive(ReactorPipeline):
             except queue.Empty:
                 break
 
-    def _target(self) -> np.ndarray:
+    def _target(self, s: SO101State) -> np.ndarray:
         """The slider positions as one absolute action row."""
-        s = self.state
         grip = GRIP_CLOSED if s.grip == "closed" else GRIP_OPEN
         return np.array(
             [s.shoulder_pan, s.shoulder_lift, s.elbow_flex, s.wrist_flex, s.wrist_roll, grip],
@@ -150,20 +164,31 @@ class SO101DreamDrive(ReactorPipeline):
         return rows, pose
 
     def _produce(self) -> None:
-        """Generate chunk N+1 while the stream is still playing chunk N."""
+        """Generate chunk N+1 while the stream is still playing chunk N.
+
+        Every read of ``self.state`` happens INSIDE the try. The runtime clears the state to
+        None between sessions, so a read out here raises AttributeError on the way to
+        ``Thread._bootstrap_inner`` and kills the producer for the life of the process — after
+        which the container still loads, still accepts sessions, and still answers SDP, but
+        serves exactly one keyframe to every client that ever connects again. It cost us an
+        afternoon precisely because nothing about the symptom points at a dead thread.
+        """
         while not self._stop.is_set():
-            if self.state.paused or self._frames.qsize() > CHUNK:
-                self._stop.wait(0.05)
-                continue
             try:
+                state = self.state
+                if state is None or state.paused or self._frames.qsize() > CHUNK:
+                    self._stop.wait(0.05)
+                    continue
                 with self._lock():
-                    cond, start = self.cond, self.pose.copy()
-                rows, end = self._walk(self._target())
+                    cond, start, epoch = self.cond, self.pose.copy(), self._epoch
+                rows, end = self._walk(self._target(state))
                 frames = self.engine.generate(
                     cond=cond, actions=rows, prompt=PROMPT, domain=DOMAIN, view=VIEW,
                     steps=DEF_STEPS, guidance=DEF_GUIDANCE, fps=FPS,
                 )
                 with self._lock():
+                    if epoch != self._epoch:
+                        continue                             # reset landed mid-chunk; drop it
                     self.pose = end
                     self.cond = frames[-HANDOFF_FRAMES:]     # motion hand-off
                 for f in frames:
@@ -179,9 +204,22 @@ class SO101DreamDrive(ReactorPipeline):
         the stream, so a slow chunk shows as a hold rather than a stall or a dropped
         connection.
         """
+        # RESEED. inference() is entered once per session, so this is "on connect": drop the
+        # conditioning and pose back to a real photograph. Without it a session inherits
+        # whatever the previous viewer's rollout drifted into, and the stream opens mangled on
+        # a fresh connection while every log on both sides looks healthy.
+        self.reset_to_anchor()
+
+        # Restart the producer if it is missing OR dead.
+        if self._worker is None or not self._worker.is_alive():
+            self._stop.clear()
+            self._worker = threading.Thread(target=self._produce, daemon=True)
+            self._worker.start()
+            logger.info("producer started")
         last: np.ndarray | None = None
         while True:
-            if self.state.paused:
+            state = self.state
+            if state is None or state.paused:
                 yield Idle
                 continue
             try:

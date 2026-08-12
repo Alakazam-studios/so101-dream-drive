@@ -1,0 +1,277 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SO-101 Dream Drive — Reactor</title>
+<!-- Empty data URI: stops the browser requesting /favicon.ico, which the page server has no
+     answer for and which shows up in the console as a bare 404. -->
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#07090b; --ink:#e8e6df; --dim:#8b8f94; --hot:#e07a3f; --line:#1b2026; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  /* Fixed to the viewport: the stage takes the leftover height and the controls sit beside
+     it, so nothing the user needs to reach lives below the fold. */
+  main { max-width:1240px; height:100%; margin:0 auto; padding:14px 20px 16px;
+         display:flex; flex-direction:column; gap:10px; }
+  h1 { font-size:15px; letter-spacing:.14em; text-transform:uppercase; margin:0 0 2px; }
+  .sub { color:var(--dim); margin:0; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .wrap { flex:1; min-height:0; display:grid;
+          grid-template-columns:minmax(0,1fr) 300px; gap:16px; }
+  aside { min-height:0; display:flex; flex-direction:column; gap:10px; overflow:auto; }
+  input[type=text] { flex:1; min-width:240px; background:#0d1116; color:var(--ink);
+                     border:1px solid var(--line); padding:7px 9px; font:inherit; border-radius:3px; }
+  button { background:transparent; color:var(--ink); border:1px solid var(--line);
+           padding:7px 13px; font:inherit; cursor:pointer; border-radius:3px; }
+  button:hover:not(:disabled) { border-color:var(--hot); color:var(--hot); }
+  button:disabled { opacity:.35; cursor:default; }
+  button.on { border-color:var(--hot); color:var(--hot); }
+  /* No aspect-ratio box: the stage fills the column and the 4:3 stream is fitted inside it,
+     which also drops the black bars the old 1:1 box added above and below. */
+  #stage { position:relative; background:#000; border:1px solid var(--line);
+           min-height:0; display:grid; place-items:center; border-radius:3px; overflow:hidden; }
+  video { width:100%; height:100%; object-fit:contain; display:block; }
+  #placeholder { position:absolute; color:var(--dim); font-size:12px; text-align:center; padding:0 20px; }
+  #dot { display:inline-block; width:7px; height:7px; border-radius:50%;
+         background:#333; margin-right:7px; vertical-align:middle; }
+  #dot.live { background:var(--hot); }
+  .joints { display:grid; gap:8px; }
+  .j { display:grid; grid-template-columns:84px 1fr 30px; gap:8px; align-items:center; }
+  .j label { color:var(--dim); font-size:12px; white-space:nowrap; }
+  .j output { text-align:right; font-variant-numeric:tabular-nums; font-size:12px; }
+  input[type=range] { width:100%; accent-color:var(--hot); background:transparent; margin:0; }
+  #log { margin-top:auto; border-top:1px solid var(--line); padding-top:8px;
+         color:var(--dim); font-size:11px; max-height:96px; overflow:auto; white-space:pre-wrap; }
+  .note { color:var(--dim); font-size:11px; margin:0; }
+  /* Narrow windows stack; the page may scroll there, which beats a 200px-wide video. */
+  @media (max-width:820px) { .wrap { grid-template-columns:1fr; } main { height:auto; } }
+</style>
+
+<main>
+  <h1>SO-101 Dream Drive</h1>
+  <p class="sub">Every frame is generated. The arm does not exist.</p>
+
+  <div class="bar">
+    <input type="text" id="base" spellcheck="false">
+    <button id="connect">Connect</button>
+    <button id="reset" disabled>Reset</button>
+    <button id="pause" disabled>Pause</button>
+  </div>
+
+  <div class="wrap">
+    <div id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <div id="placeholder"><span id="dot"></span>not connected</div>
+    </div>
+
+    <aside>
+      <div class="joints" id="joints"></div>
+      <p class="note">
+        Sliders are absolute joint targets in LeRobot units. Each chunk walks toward the
+        target under a slew clamp rather than jumping, because the model saw teleop at human
+        speeds. A chunk is 16 frames at 15 fps.
+      </p>
+      <div id="log"></div>
+    </aside>
+  </div>
+</main>
+
+<script>
+// The Reactor session id is fixed for a single-tenant runtime.
+const SID = "00000000-0000-0000-0000-000000000000";
+const JOINTS = [
+  ["shoulder_pan",  "Base pan"],
+  ["shoulder_lift", "Shoulder"],
+  ["elbow_flex",    "Elbow"],
+  ["wrist_flex",    "Wrist pitch"],
+  ["wrist_roll",    "Wrist roll"],
+];
+
+const $ = id => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+$("base").value = qs.get("base") || "http://34.135.249.244:8080";
+
+let pc = null, dc = null, paused = false;
+
+function log(msg) {
+  $("log").textContent += msg + "\n";
+  $("log").scrollTop = $("log").scrollHeight;
+}
+const base = () => $("base").value.replace(/\/$/, "");
+
+async function api(method, path, body) {
+  const r = await fetch(base() + path, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`${method} ${path} -> ${r.status} ${text.slice(0, 200)}`);
+  return text ? JSON.parse(text) : {};
+}
+
+// A model command is an application-scoped envelope on the data channel. The runtime sniffs
+// JSON as protocol v0; the inner `type` is the command name generated from the state field.
+function send(type, data) {
+  if (!dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify({ scope: "application", data: { type, data: data || {} } }));
+}
+
+// Build the joint controls.
+for (const [name, label] of JOINTS) {
+  const row = document.createElement("div");
+  row.className = "j";
+  row.innerHTML =
+    `<label for="s_${name}">${label}</label>` +
+    `<input type="range" id="s_${name}" min="-100" max="100" step="1" value="0" disabled>` +
+    `<output id="o_${name}">0</output>`;
+  $("joints").appendChild(row);
+  const slider = row.querySelector("input");
+  let timer = null;
+  slider.addEventListener("input", () => {
+    $(`o_${name}`).textContent = slider.value;
+    // Coalesce drags: one command per 80 ms is plenty at 15 fps.
+    clearTimeout(timer);
+    timer = setTimeout(() => send(`set_${name}`, { [name]: Number(slider.value) }), 80);
+  });
+}
+
+// The pipeline still exposes set_grip; this page drives the five arm joints only.
+
+$("reset").onclick = () => { send("reset_to_anchor", {}); log("reset to anchor"); };
+$("pause").onclick = () => {
+  paused = !paused;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").classList.toggle("on", paused);
+  send("set_paused", { paused });
+};
+
+function enable(on) {
+  document.querySelectorAll('#joints input, #joints button').forEach(el => el.disabled = !on);
+  $("reset").disabled = !on;
+  $("pause").disabled = !on;
+}
+
+async function connect() {
+  $("connect").disabled = true;
+  try {
+    // 1. The session must be running before the transport will accept a connection.
+    //    A session whose client vanished sits in `orphaned` and refuses start_session with a
+    //    409 until it has been stopped and has drained back to `ready`.
+    let s = await api("GET", "/session");
+    log(`session ${s.state} — ${s.model?.name} on runtime ${s.server_info?.server_version}`);
+    if (s.state === "orphaned" || s.state === "streaming") {
+      await api("POST", "/stop_session", {}).catch(() => {});
+      for (let i = 0; i < 40 && s.state !== "ready"; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        s = await api("GET", "/session");
+      }
+      log(`drained -> ${s.state}`);
+    }
+    if (s.state !== "waiting" && s.state !== "running") {
+      s = await api("POST", "/start_session", {});
+      log(`started -> ${s.state}`);
+    }
+
+    // 2. ICE servers come from the runtime, not from the page.
+    const ice = await api("GET", `/sessions/${SID}/transport/webrtc/ice_servers`);
+    const iceServers = (ice.ice_servers || []).map(e => ({
+      urls: e.uris,
+      ...(e.credentials
+        ? { username: e.credentials.username, credential: e.credentials.password }
+        : {}),
+    }));
+
+    pc = new RTCPeerConnection({ iceServers });
+    window.pc = pc;   // debugging handle; `let` bindings are not window properties
+    // Sample the inbound stream once a second so a stalled generator can be told apart from a
+    // failed network path: bytes flat with ICE connected is the model idling, bytes flat with
+    // ICE disconnected is the path.
+    window.TRACE = [];
+    const t0 = Date.now();
+    setInterval(async () => {
+      if (!pc || pc.connectionState === "closed") return;
+      let fr = 0, by = 0;
+      (await pc.getStats()).forEach(st => {
+        if (st.type === "inbound-rtp" && st.kind === "video") { fr = st.framesDecoded; by = st.bytesReceived; }
+      });
+      window.TRACE.push(`${((Date.now() - t0) / 1000).toFixed(0)}s ice=${pc.iceConnectionState} frames=${fr} kB=${Math.round(by / 1024)}`);
+    }, 1000);
+    pc.oniceconnectionstatechange = () => {
+      log(`ice: ${pc.iceConnectionState}`);
+      const live = pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed";
+      $("dot").classList.toggle("live", live);
+      if (live) $("placeholder").style.display = "none";
+    };
+    pc.ontrack = ev => {
+      $("video").srcObject = ev.streams[0] || new MediaStream([ev.track]);
+      log("video track attached");
+    };
+
+    // The data channel carries commands, and must exist before the offer so it is negotiated.
+    dc = pc.createDataChannel("data");
+    window.dc = dc;
+    dc.onopen = () => {
+      log("data channel open — controls live");
+      enable(true);
+      // LIVENESS PING, NOT OPTIONAL. The runtime reaps a connection that has not pinged in
+      // ping_timeout (20 s by default), whatever the media is doing. Without this the stream
+      // dies at 20 s every single time and every log on both sides reads like a network fault.
+      clearInterval(window.PING);
+      window.PING = setInterval(() => {
+        if (dc.readyState === "open") {
+          dc.send(JSON.stringify({ scope: "runtime", data: { type: "ping", data: {} } }));
+        }
+      }, 5000);
+    };
+    dc.onclose = () => clearInterval(window.PING);
+    dc.onmessage = ev => log(`< ${String(ev.data).slice(0, 160)}`);
+
+    // Receive-only video: the model produces, the page consumes.
+    const tx = pc.addTransceiver("video", { direction: "recvonly" });
+    await pc.setLocalDescription(await pc.createOffer());
+
+    // 3. Register a connection, then hand over the offer with the track mapping. The track
+    //    name must match what the model declares (main_video), not the mid.
+    const conn = await api("POST", `/sessions/${SID}/transport/webrtc/connections`, {});
+    const cid = conn.connection_id;
+    log(`connection ${cid}`);
+
+    pc.onicecandidate = ev => {
+      if (!ev.candidate) return;
+      api("POST", `/sessions/${SID}/transport/webrtc/connections/${cid}/ice_candidates`, {
+        candidates: [{
+          candidate: ev.candidate.candidate,
+          sdp_mid: ev.candidate.sdpMid,
+          sdp_mline_index: ev.candidate.sdpMLineIndex,
+        }],
+      }).catch(e => log(`ice post failed: ${e.message}`));
+    };
+
+    await api("POST", `/sessions/${SID}/transport/webrtc/connections/${cid}/sdp_params`, {
+      sdp_offer: pc.localDescription.sdp,
+      track_mapping: [{ mid: tx.mid, name: "main_video", kind: "video", direction: "recvonly" }],
+      ice_servers: ice.ice_servers || [],
+    });
+
+    // 4. The answer is produced asynchronously; poll for it.
+    let answer = null;
+    for (let i = 0; i < 60 && !answer; i++) {
+      await new Promise(r => setTimeout(r, 250));
+      try {
+        const got = await api("GET", `/sessions/${SID}/transport/webrtc/connections/${cid}/sdp_params`);
+        if (got.sdp_answer) answer = got.sdp_answer;
+      } catch { /* not ready yet */ }
+    }
+    if (!answer) throw new Error("no SDP answer within 15 s");
+    await pc.setRemoteDescription({ type: "answer", sdp: answer });
+    log("answer applied — negotiating media");
+  } catch (e) {
+    log(`FAILED: ${e.message}`);
+    $("connect").disabled = false;
+  }
+}
+
+$("connect").onclick = connect;
+</script>
