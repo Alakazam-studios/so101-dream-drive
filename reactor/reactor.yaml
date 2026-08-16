@@ -1,5 +1,35 @@
+apiVersion: v1beta
+kind: VideoModel
+
+# `reactor model register / publish / deploy` read this block. Without it those
+# commands cannot run from this directory at all, so the workspace is only usable
+# for `reactor run` locally.
+model:
+  name: so101-dream-drive
+  version: v0.0.1
+  description: |
+    Drive an SO-101 arm that does not exist. Cosmos 3 Edge 4B fine-tune doing
+    forward dynamics: joint-angle sliders condition a 16-frame video rollout of
+    the arm executing the commanded motion.
+
+  # Required: the model is CUDA-only and holds ~22 GB (wants ~24 GB free), so it
+  # must not be scheduled onto whatever the platform default is. `gpu.type` is
+  # account-specific — it has to name an accelerator your Reactor account holds an
+  # allocation for, in a region that offers it. List the accepted values with
+  # `reactor gpu ls` (note that lists what the PLATFORM supports, not what your
+  # account is entitled to; a wrong choice is only caught when a deploy that
+  # claims capacity is rejected).
+  resources:
+    gpu:
+      type: NVIDIA_B200
+      count: 1
+
 runtime:
   import: so101_dream:SO101DreamDrive
+
+build:
+  # Matches the `reactor-runtime==3.1.2` pin installed by the Dockerfile.
+  runtime_version: "3.1.2"
 
 recording:
   enabled: true
